@@ -123,18 +123,6 @@ function renderTypeFace(value) {
   return `<span class="type-compound"><span class="type-compound-small"><span>${escapeHtml(prefix)}</span>${smallSecond ? `<span>${escapeHtml(smallSecond)}</span>` : ''}</span><span class="type-compound-large">${escapeHtml(large)}</span></span>`;
 }
 
-/** typeリールの「面」にコマの値を反映する(通常種別はテキスト、複合種別は左右2分割で描画) */
-function setTypeFaceValue(face, value) {
-  if (!face) return;
-  const compound = isCompoundType(value);
-  face.classList.toggle('is-compound', compound);
-  if (compound) {
-    face.innerHTML = renderTypeFace(value);
-  } else {
-    face.textContent = value;
-  }
-}
-
 const els = {};
 
 document.addEventListener('DOMContentLoaded', init);
@@ -637,30 +625,46 @@ function flapTargetIndices(d) {
 function flapTile(className, reelKey, idx) {
   const value = FLAP_REEL[reelKey][idx] || '';
   const style = reelKey === 'type' ? getFlapTypeStyle(value) : '';
-  const faceContent = reelKey === 'type' ? renderTypeFace(value) : escapeHtml(value);
-  const faceClass = reelKey === 'type' && isCompoundType(value) ? ' is-compound' : '';
-  const faceStyle = reelKey === 'type' ? ` style="font-size:${fitTypeFontSize(value)}"` : '';
-  return `<span class="flap-tile ${className}" data-reel="${reelKey}" data-idx="${idx}"${style ? ` style="${style}"` : ''}><span class="flap-face${faceClass}"${faceStyle}>${faceContent}</span></span>`;
+  if (reelKey === 'type' && isCompoundType(value)) {
+    return `<span class="flap-tile ${className} is-compound-tile" data-reel="${reelKey}" data-idx="${idx}"${style ? ` style="${style}"` : ''}><span class="flap-face is-compound">${renderTypeFace(value)}</span></span>`;
+  }
+  return `<span class="flap-tile ${className}" data-reel="${reelKey}" data-idx="${idx}"${style ? ` style="${style}"` : ''}>${halvesHtml(value)}</span>`;
+}
+
+/** 上下2分割の静的な面(実機のコマそのもの)のHTML断片を作る */
+function halvesHtml(value) {
+  const escaped = escapeHtml(value);
+  return `<span class="flap-static flap-static-top"><span class="flap-static-inner">${escaped}</span></span>`
+    + `<span class="flap-static flap-static-bottom"><span class="flap-static-inner">${escaped}</span></span>`;
 }
 
 /**
- * 種別コマの文字が枠いっぱいに近くなるよう、文字数に応じてフォントサイズを決める。
- * 複合種別(「船渡川から普通特急」等)は右側の大きい部分の文字数を基準にする。
+ * コマの文字が枠に収まらない場合、フォントサイズはあまり変えず左右方向に圧縮して収める。
+ * (実機の行先表示などが長い駅名を横に潰して収めているのを再現)
  */
-function fitTypeFontSize(value) {
-  if (!value) return '26px';
-  let basis = value;
-  if (isCompoundType(value)) {
-    const cutIdx = value.indexOf('から') + 2;
-    const rest = value.slice(cutIdx);
-    basis = rest;
-    for (const cand of KNOWN_TYPE_SUFFIXES) {
-      if (rest.endsWith(cand) && rest.length > cand.length) { basis = cand; break; }
-    }
-  }
-  const len = [...basis].length || 1;
-  const px = Math.min(40, Math.max(13, 122 / len));
-  return `${px.toFixed(1)}px`;
+function fitTileText(el, innerEls) {
+  if (!el) return;
+  const width = el.clientWidth;
+  if (!width) return;
+  let fontSize = 22;
+  try {
+    fontSize = parseFloat(window.getComputedStyle(el).fontSize) || fontSize;
+  } catch (e) { /* noop */ }
+  const avail = Math.max(0, width - 8);
+  const targets = innerEls || el.querySelectorAll('.flap-static-inner');
+  targets.forEach((inner) => {
+    if (!inner) return;
+    const text = inner.textContent || '';
+    const len = [...text].length || 1;
+    const natural = len * fontSize * 0.98;
+    const scale = natural > avail ? Math.max(0.5, avail / natural) : 1;
+    inner.style.transform = scale < 1 ? `scaleX(${scale.toFixed(3)})` : '';
+  });
+}
+
+/** サイン全体を差分更新/初期構築した後、すべてのコマの横圧縮を再計算する */
+function fitAllFlapTiles() {
+  els.board.querySelectorAll('.flap-tile:not(.is-compound-tile)').forEach((el) => fitTileText(el));
 }
 
 function flapRowHtml(d) {
@@ -681,6 +685,7 @@ function flapRowHtml(d) {
 function updateFlapSign(slots) {
   if (!els.board.querySelector('.flap-sign')) {
     els.board.innerHTML = flapSignHtml(slots);
+    fitAllFlapTiles();
     return;
   }
   const rows = els.board.querySelectorAll('.flap-row');
@@ -699,21 +704,11 @@ function updateFlapSign(slots) {
 
 const FLAP_STEP_MS = 90; // 1コマあたりのめくり間隔(動画の実機を参考に、より速く小気味よく)
 
-/** そのコマの土台(面)に値を反映する(種別コマは色・サイズも一緒に更新) */
-function setFaceValue(el, face, val) {
-  if (el.dataset.reel === 'type') {
-    setTypeFaceValue(face, val);
-    face.style.fontSize = fitTypeFontSize(val);
-    el.style.cssText = getFlapTypeStyle(val);
-  } else if (face) {
-    face.textContent = val;
-  }
-}
-
 /**
  * 指定コマまで、リールの並び順(0→1→2→…→59→0)通りに1コマずつめくっていく。
- * 実機同様、めくれる瞬間だけ「古い値を印字した葉」を上から重ねて落とし、
- * その下では既に次の値に切り替わった土台が見えている(=葉が落ちきると新しい値が現れる)。
+ * 実機同様、コマは上下2分割になっていて「上半分だけ」が下向きに回転しながら落ち、
+ * その下で待っている(先に新しい値へ切り替え済みの)上半分が現れる。下半分は常に静止したまま。
+ * この1コマぶんのめくりを、目的のコマに着くまで繰り返す。
  */
 function flipReelTo(el, targetIdx) {
   if (!el) return;
@@ -723,7 +718,6 @@ function flipReelTo(el, targetIdx) {
 
   el._flipToken = (el._flipToken || 0) + 1;
   const token = el._flipToken;
-  const face = el.querySelector('.flap-face');
   let idx = curIdx;
 
   const step = () => {
@@ -732,28 +726,46 @@ function flipReelTo(el, targetIdx) {
     idx = (idx + 1) % reel.length;
     const toVal = reel[idx];
 
-    // 古い値を印字した葉を重ねてから、回転しながら落とす(実機の1コマぶんのめくり)
-    if (el._activeLeaf) el._activeLeaf.remove(); // 前のコマの葉が残っていれば即座に片付ける
-    const leaf = document.createElement('span');
-    leaf.className = 'flap-leaf';
-    leaf.textContent = fromVal;
-    if (el.dataset.reel === 'type') leaf.style.fontSize = fitTypeFontSize(fromVal);
-    el.appendChild(leaf);
-    el._activeLeaf = leaf;
-    void leaf.offsetWidth; // アニメーション開始のための強制リフロー
-    leaf.classList.add('is-flipping');
-    window.setTimeout(() => {
-      if (el._activeLeaf === leaf) el._activeLeaf = null;
-      leaf.remove();
-    }, FLAP_STEP_MS + 50);
-
-    // 衝撃フラッシュ(コマが下まで落ちた瞬間のガシャッという光)
     el.classList.remove('flap-flip');
-    void el.offsetWidth;
+    void el.offsetWidth; // 衝撃フラッシュ再始動のための強制リフロー
     el.classList.add('flap-flip');
 
-    // 葉の下の土台は先に新しい値へ切り替えておく(葉が落ちきると同時に見える)
-    setFaceValue(el, face, toVal);
+    const toCompound = el.dataset.reel === 'type' && isCompoundType(toVal);
+    const wasCompound = el.classList.contains('is-compound-tile');
+
+    if (toCompound || wasCompound) {
+      // 複合種別が絡む場合だけは上下分割せず、まるごと差し替える(レアケースの簡略化)
+      el.classList.toggle('is-compound-tile', toCompound);
+      if (toCompound) {
+        el.innerHTML = `<span class="flap-face is-compound">${renderTypeFace(toVal)}</span>`;
+      } else {
+        el.innerHTML = halvesHtml(toVal);
+        fitTileText(el);
+      }
+    } else {
+      // 通常ケース: 上半分に「古い値の上半分」の葉を重ねて落とす
+      if (el._activeLeaf) el._activeLeaf.remove(); // 前のコマの葉が残っていれば即座に片付ける
+      const leaf = document.createElement('span');
+      leaf.className = 'flap-leaf-top';
+      leaf.innerHTML = `<span class="flap-static-inner">${escapeHtml(fromVal)}</span>`;
+      el.appendChild(leaf);
+      el._activeLeaf = leaf;
+      void leaf.offsetWidth; // アニメーション開始のための強制リフロー
+      leaf.classList.add('is-flipping');
+      window.setTimeout(() => {
+        if (el._activeLeaf === leaf) el._activeLeaf = null;
+        leaf.remove();
+      }, FLAP_STEP_MS + 50);
+
+      // 葉の下の土台(上下とも)は先に新しい値へ切り替えておく(葉が落ちきると同時に上側が現れる)
+      const topInner = el.querySelector('.flap-static-top .flap-static-inner');
+      const bottomInner = el.querySelector('.flap-static-bottom .flap-static-inner');
+      if (topInner) topInner.textContent = toVal;
+      if (bottomInner) bottomInner.textContent = toVal;
+      fitTileText(el, [topInner, bottomInner, leaf.querySelector('.flap-static-inner')]);
+    }
+
+    if (el.dataset.reel === 'type') el.style.cssText = getFlapTypeStyle(toVal);
     el.dataset.idx = idx;
 
     if (idx !== targetIdx) {
