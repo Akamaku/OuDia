@@ -84,6 +84,46 @@ function getFlapTypeStyle(value) {
   return color ? `background:${color};color:#fff;` : '';
 }
 
+/**
+ * 「船渡川から普通特急」のような "〜からXY" 形式の種別は、
+ * 「〜から」「X」を左に小さく2段、"Y"(既知の種別名に一致する末尾)を右に大きく表示する。
+ * 一致しない場合は普通にそのまま表示する。
+ */
+const KNOWN_TYPE_SUFFIXES = ['区間急行', '通勤急行', '通勤快速', '特急', '急行', '快速', 'ライナー', '準急', '普通'];
+
+function isCompoundType(value) {
+  return typeof value === 'string' && value.includes('から');
+}
+
+function renderTypeFace(value) {
+  if (!isCompoundType(value)) return escapeHtml(value || '');
+  const cutIdx = value.indexOf('から') + 2;
+  const prefix = value.slice(0, cutIdx); // 例: "船渡川から"
+  const rest = value.slice(cutIdx); // 例: "普通特急"
+  let large = rest;
+  let smallSecond = '';
+  for (const cand of KNOWN_TYPE_SUFFIXES) {
+    if (rest.endsWith(cand) && rest.length > cand.length) {
+      smallSecond = rest.slice(0, rest.length - cand.length);
+      large = cand;
+      break;
+    }
+  }
+  return `<span class="type-compound"><span class="type-compound-small"><span>${escapeHtml(prefix)}</span>${smallSecond ? `<span>${escapeHtml(smallSecond)}</span>` : ''}</span><span class="type-compound-large">${escapeHtml(large)}</span></span>`;
+}
+
+/** typeリールの「面」にコマの値を反映する(通常種別はテキスト、複合種別は左右2分割で描画) */
+function setTypeFaceValue(face, value) {
+  if (!face) return;
+  const compound = isCompoundType(value);
+  face.classList.toggle('is-compound', compound);
+  if (compound) {
+    face.innerHTML = renderTypeFace(value);
+  } else {
+    face.textContent = value;
+  }
+}
+
 const els = {};
 
 document.addEventListener('DOMContentLoaded', init);
@@ -145,10 +185,6 @@ function cacheElements() {
   els.emptyState = document.getElementById('empty-state');
   els.modalOverlay = document.getElementById('train-modal-overlay');
   els.modalPanel = document.getElementById('train-modal-panel');
-  els.infoRosen = document.getElementById('info-rosen');
-  els.infoDia = document.getElementById('info-dia');
-  els.infoDirection = document.getElementById('info-direction');
-  els.infoStation = document.getElementById('info-station');
   els.filterControls = document.getElementById('filter-controls');
   els.typeFilter = document.getElementById('type-filter');
   els.destFilter = document.getElementById('dest-filter');
@@ -160,21 +196,18 @@ function bindEvents() {
     state.diaIndex = parseInt(e.target.value, 10);
     state.typeFilter = '';
     state.destFilter = '';
-    updateInfoStrip();
     renderBoard();
   });
   els.stationSelect.addEventListener('change', (e) => {
     state.stationIndex = parseInt(e.target.value, 10);
     state.typeFilter = '';
     state.destFilter = '';
-    updateInfoStrip();
     renderBoard();
   });
   els.directionButtons.forEach((btn) => {
     btn.addEventListener('click', () => {
       state.directionFilter = btn.dataset.direction;
       els.directionButtons.forEach((b) => b.classList.toggle('is-active', b === btn));
-      updateInfoStrip();
       renderBoard();
     });
   });
@@ -387,7 +420,6 @@ async function loadOudFile(path) {
     populateDiaSelect(timetable.dias);
     populateStationSelect(timetable.stations);
 
-    updateInfoStrip();
     renderBoard();
   } catch (err) {
     console.error(err);
@@ -423,18 +455,6 @@ function showStatus(msg, level) {
   els.status.dataset.level = level || 'info';
   const visible = level === 'warn' || level === 'error';
   els.statusBar.classList.toggle('is-hidden', !visible);
-}
-
-/** ヘッダー上部の固定情報(路線・ダイヤ・方向・駅)を更新 */
-function updateInfoStrip() {
-  if (!state.timetable) return;
-  const dia = state.timetable.dias[state.diaIndex];
-  const station = state.timetable.stations[state.stationIndex];
-  const dirLabelMap = { all: 'すべて', Kudari: '下り', Nobori: '上り' };
-  els.infoRosen.textContent = els.rosenName.textContent || '—';
-  els.infoDia.textContent = (dia && dia.name) || '—';
-  els.infoDirection.textContent = dirLabelMap[state.directionFilter] || 'すべて';
-  els.infoStation.textContent = (station && station.name) || '—';
 }
 
 /** 現在の基準時刻を「サービス日 0:00起点の分数」で返す(4時始発想定・深夜帯対応)。手動時刻は経過分ぶん進み続ける */
@@ -583,7 +603,9 @@ function flapTargetIndices(d) {
 function flapTile(className, reelKey, idx) {
   const value = FLAP_REEL[reelKey][idx] || '';
   const style = reelKey === 'type' ? getFlapTypeStyle(value) : '';
-  return `<span class="flap-tile ${className}" data-reel="${reelKey}" data-idx="${idx}"${style ? ` style="${style}"` : ''}><span class="flap-face">${escapeHtml(value)}</span></span>`;
+  const faceContent = reelKey === 'type' ? renderTypeFace(value) : escapeHtml(value);
+  const faceClass = reelKey === 'type' && isCompoundType(value) ? ' is-compound' : '';
+  return `<span class="flap-tile ${className}" data-reel="${reelKey}" data-idx="${idx}"${style ? ` style="${style}"` : ''}><span class="flap-face${faceClass}">${faceContent}</span></span>`;
 }
 
 function flapRowHtml(d) {
@@ -643,11 +665,13 @@ function flipReelTo(el, targetIdx) {
     window.setTimeout(() => {
       if (el._flipToken !== token) return;
       const val = reel[idx];
-      if (face) face.textContent = val;
-      el.dataset.idx = idx;
       if (el.dataset.reel === 'type') {
+        setTypeFaceValue(face, val);
         el.style.cssText = getFlapTypeStyle(val); // 実機の色付きコマを再現(通過中のコマの色も含めて切り替わる)
+      } else if (face) {
+        face.textContent = val;
       }
+      el.dataset.idx = idx;
     }, FLAP_STEP_MS * 0.45); // コマが真横になる瞬間に文字を差し替える
     if (idx !== targetIdx) {
       window.setTimeout(step, FLAP_STEP_MS);
