@@ -235,6 +235,7 @@ select:focus, input:focus, button:focus {
 
 /* ---------- パタパタ(反転フラップ)式サイン ---------- */
 .flap-sign {
+  --flap-tile-h: 68px;
   background: #17181a;
   border-radius: 0;
   padding: 14px;
@@ -253,7 +254,7 @@ select:focus, input:focus, button:focus {
   text-transform: uppercase;
   color: #8b93a0;
 }
-.flap-h:nth-child(1) { flex: 0 0 180px; }
+.flap-h:nth-child(1) { flex: 0 0 190px; }
 .flap-h:nth-child(2) { flex: 0 0 140px; }
 .flap-h:nth-child(3) { flex: 1; }
 
@@ -267,7 +268,24 @@ select:focus, input:focus, button:focus {
   gap: 8px;
   cursor: pointer;
 }
-.flap-time { flex: 0 0 180px; display: flex; align-items: center; gap: 3px; }
+.flap-time {
+  flex: 0 0 190px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+} /* 時|:|分 のように、時と分をそれぞれ独立した枠にまとめる */
+.flap-hour-box,
+.flap-minute-box {
+  display: flex;
+  background: #0c0d0e;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06), 0 2px 4px rgba(0, 0, 0, 0.4);
+  height: var(--flap-tile-h);
+}
+.flap-hour-box .flap-tile,
+.flap-minute-box .flap-tile {
+  background: transparent;
+  box-shadow: none;
+}
 .flap-colon {
   color: #f2d9a0;
   font-weight: 900;
@@ -302,57 +320,90 @@ select:focus, input:focus, button:focus {
   display: inline-block;
 }
 
-/* 上下2分割の面。上半分・下半分それぞれ、実寸の文字を半分だけ覗かせる */
+/* 上下2分割の面。上半分・下半分それぞれ、実寸(タイル全高)の文字を半分だけ覗かせる */
 .flap-static {
   position: absolute;
   left: 0;
   right: 0;
   height: 50%;
   overflow: hidden;
-  display: flex;
-  justify-content: center;
 }
-.flap-static-top { top: 0; align-items: flex-end; }
-.flap-static-bottom { bottom: 0; align-items: flex-start; }
+.flap-static-top { top: 0; }
+.flap-static-bottom { bottom: 0; }
 .flap-static-inner {
-  display: block;
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: var(--flap-tile-h);
+  display: flex;
+  align-items: center;
+  justify-content: center;
   line-height: 1;
-  transform-origin: center;
   max-width: 100%;
   white-space: nowrap;
+  transform-origin: center;
 }
-.flap-static-top .flap-static-inner { transform: translateY(50%); }
-.flap-static-bottom .flap-static-inner { transform: translateY(-50%); }
+.flap-static-top .flap-static-inner { top: 0; }
+.flap-static-bottom .flap-static-inner { bottom: 0; }
 
-/* めくれ落ちる「葉」: 上半分だけを覆い、古い値を印字して重ねてから下向きに回転して消える */
-.flap-leaf-top {
+/* めくれる板: 中央の水平線(タイル下端=板の下端)を軸に、手前へ180°倒れ込む。
+   板は1枚だけ(基準点を1つに統一)。真横になった瞬間、中身をJS側で
+   「古い値の上半分」→「次の値の下半分」に差し替えることで、
+   倒れ切ると裏面が下半分の土台とぴったり重なって見えるようにしている。 */
+.flap-leaf {
   position: absolute;
   left: 0;
   right: 0;
   top: 0;
   height: 50%;
   overflow: hidden;
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
   background: #101112;
   box-shadow: inset 0 -10px 14px -10px rgba(0, 0, 0, 0.7);
   transform-origin: 50% 100%;
-  backface-visibility: hidden;
   z-index: 5;
   pointer-events: none;
 }
-.flap-leaf-top .flap-static-inner { transform: translateY(50%); }
-.flap-leaf-top.is-flipping {
-  animation: flap-leaf-fall 0.11s cubic-bezier(0.6, 0, 0.9, 0.35) forwards;
+.flap-leaf-inner { top: 0; } /* 前半(上半分クリップ、古い値) */
+.flap-leaf-inner.is-bottom-half { top: auto; bottom: 0; } /* 後半(下半分クリップ、次の値) */
+
+.flap-leaf.is-flipping {
+  animation: flap-leaf-fall 0.13s linear forwards;
 }
 @keyframes flap-leaf-fall {
-  0%   { transform: rotateX(0deg); filter: brightness(1); }
-  55%  { transform: rotateX(-78deg); filter: brightness(0.55); }
-  100% { transform: rotateX(-92deg); filter: brightness(0.3); }
+  0%   {
+    transform: rotateX(0deg) scaleY(1);
+    filter: brightness(1);
+    animation-timing-function: cubic-bezier(0.7, 0, 0.84, 0); /* 落ち始めはゆっくり、加速していく */
+  }
+  46% {
+    transform: rotateX(82deg) scaleY(0.86);
+    filter: brightness(0.5);
+    animation-timing-function: cubic-bezier(0.4, 0, 0.6, 1);
+  }
+  52% {
+    transform: rotateX(90deg) scaleY(0.8);
+    filter: brightness(0.4);
+    animation-timing-function: cubic-bezier(0.16, 0, 0.3, 1); /* 真横を過ぎたら一気に落ちて止まる */
+  }
+  100% {
+    transform: rotateX(180deg) scaleY(1);
+    filter: brightness(1);
+  }
 }
+
+/* 目的のコマに着地した瞬間だけ、ほんの一瞬跳ねて静止する */
+.flap-tile.flap-settle {
+  animation: flap-settle 0.2s cubic-bezier(0.34, 1.4, 0.4, 1);
+}
+@keyframes flap-settle {
+  0%   { transform: scaleY(1); }
+  35%  { transform: scaleY(0.93); }
+  62%  { transform: scaleY(1.025); }
+  100% { transform: scaleY(1); }
+}
+
 .flap-tile.flap-flip {
-  animation: flap-impact 0.12s ease-out;
+  animation: flap-impact 0.14s ease-out;
 }
 @keyframes flap-impact {
   0%, 40% { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06), 0 2px 4px rgba(0, 0, 0, 0.4); }
@@ -367,33 +418,41 @@ select:focus, input:focus, button:focus {
 .flap-row.is-empty { cursor: default; }
 .flap-row.is-empty .flap-static-inner { color: transparent; }
 
-.flap-hour, .flap-minute {
-  width: 70px;
+.flap-digit {
+  width: 40px;
   height: 68px;
-  font-size: 38px;
+  font-size: 36px;
   font-variant-numeric: tabular-nums;
-  letter-spacing: -0.02em;
 }
 .flap-type {
   flex: 0 0 140px;
-  height: 68px;
-  font-size: 21px;
+  height: var(--flap-tile-h);
+  font-size: 32px;
   font-weight: 900;
   letter-spacing: 0.01em;
   padding: 0 4px;
-  text-align: center;
-  overflow: hidden;
 }
-.flap-type .flap-face {
+.flap-dest {
+  flex: 1;
+  height: var(--flap-tile-h);
+  font-size: 32px;
+  font-weight: 900;
+  padding: 0 10px;
+}
+.flap-type .flap-static-inner,
+.flap-dest .flap-static-inner {
   overflow: hidden;
   text-overflow: clip;
   white-space: nowrap;
   max-width: 100%;
-  line-height: 1;
 }
-.flap-type .flap-face.is-compound {
-  white-space: normal;
-  overflow: visible;
+
+/* 複合種別(「船渡川から普通特急」等)は上下分割せず、ひとつのまとまりとして表示する */
+.flap-compound-face {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
   width: 100%;
   height: 100%;
 }
@@ -421,26 +480,20 @@ select:focus, input:focus, button:focus {
   font-weight: 900;
   letter-spacing: 0.02em;
 }
-.flap-dest {
-  flex: 1;
-  height: 68px;
-  font-size: 23px;
-  padding: 0 10px;
-  overflow: hidden;
-}
 
 @media (max-width: 760px) {
-  .flap-h:nth-child(1) { flex-basis: 132px; }
+  .flap-sign { --flap-tile-h: 54px; }
+  .flap-h:nth-child(1) { flex-basis: 138px; }
   .flap-h:nth-child(2), .flap-type { flex-basis: 96px; }
-  .flap-time { flex-basis: 132px; }
-  .flap-hour, .flap-minute { width: 50px; height: 54px; font-size: 26px; }
-  .flap-type, .flap-dest { height: 54px; }
-  .flap-type { font-size: 15px; }
-  .flap-dest { font-size: 18px; }
+  .flap-time { flex-basis: 138px; }
+  .flap-digit { width: 30px; height: 54px; font-size: 26px; }
+  .flap-type { font-size: 20px; }
+  .flap-dest { font-size: 22px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .flap-leaf-top.is-flipping { animation: none; opacity: 0; }
+  .flap-leaf.is-flipping { animation: none; opacity: 0; }
   .flap-tile.flap-flip { animation: none; }
+  .flap-tile.flap-settle { animation: none; }
 }
 
 /* 時刻表ブラウザ側でも同じフォントトーンの種別バッジ・時刻表記を使う */

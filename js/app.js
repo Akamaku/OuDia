@@ -18,38 +18,43 @@ const state = {
   manualClock: null, // {hour, minute}
   typeFilter: '', // 時刻表ブラウザ用の種別絞り込み
   destFilter: '', // 時刻表ブラウザ用の行先絞り込み
-  flapRotationOffset: 0, // 表示枠を超える候補列車をローテーション表示するための位置
 };
 
 const FLAP_ROW_COUNT = 3; // 発車案内の表示段数
-const FLAP_ROTATION_POOL_SIZE = 9; // ローテーション対象とする候補列車の最大数
-const FLAP_ROTATION_INTERVAL_MS = 9000; // ローテーションの間隔(実物の発車標を参考にした値)
 
 /**
- * パタパタ(反転フラップ)式表示機は、60コマの物理リールを模している。
- * 「時」「分」「種別」「行先」それぞれ独立したリールで、コマに無い値は空欄(無表示)。
+ * パタパタ(反転フラップ)式表示機は、実機同様1コマ=1文字のリールを模している。
+ * 「時」「分」は0〜9+空欄の11コマ、「種別」「行先」は文字位置ごとに実際に登場する文字だけを積む。
  * リールは一方向にしか回らないため、値が変わるときは目的のコマまで1つずつ順番にめくれる。
  * 実際の車両・路線に合わせて自由に編集してください。
  */
-const FLAP_SLOTS = 60;
 const FLAP_TYPES = [
   '普通', '急行', '特急', '通勤急行', 'ライナー', '回送',
-  '通過', '臨時', '団体', '試運転', '区間急行', '船渡川から普通特急',
+  '通過', '臨時', '団体', '試運転', '区間急行', '船渡川から普通 特急',
 ];
 const FLAP_DESTINATIONS = [
   '青波中央', '茶志内', '船渡川', '高輪平', '朝日ヶ丘', '港が丘', '新森町', '花咲野',
 ];
 const FLAP_MAX_HOUR = 28; // 時のコマは00〜28まで(深夜帯対応)。それ以外は無表示
 
-/** index(0〜59) → そのコマに印字されている文字列、を返すリールを1本組み立てる */
-function buildFlapReel(mapFn) {
-  return Array.from({ length: FLAP_SLOTS }, (_, i) => mapFn(i));
+/** 時刻の1桁ぶんのリール(実機同様、コマは1つにつき1文字)。0〜9の10コマ+空欄1コマの11コマ構成。 */
+const DIGIT_SLOTS = 11;
+function buildDigitReel() {
+  return Array.from({ length: DIGIT_SLOTS }, (_, i) => (i < 10 ? String(i) : ''));
 }
+
+/** 種別・行先は単語ごと1枚のコマとして扱う(あらかじめ用意した単語一覧+空欄1コマ) */
+function buildWordReel(words) {
+  return [...words, ''];
+}
+
 const FLAP_REEL = {
-  hour: buildFlapReel((i) => (i <= FLAP_MAX_HOUR ? String(i).padStart(2, '0') : '')),
-  minute: buildFlapReel((i) => String(i).padStart(2, '0')),
-  type: buildFlapReel((i) => FLAP_TYPES[i] || ''),
-  dest: buildFlapReel((i) => FLAP_DESTINATIONS[i] || ''),
+  hourTens: buildDigitReel(),
+  hourOnes: buildDigitReel(),
+  minuteTens: buildDigitReel(),
+  minuteOnes: buildDigitReel(),
+  type: buildWordReel(FLAP_TYPES),
+  dest: buildWordReel(FLAP_DESTINATIONS),
 };
 
 /** リール上でその値が最初に現れるコマ番号。無ければ最初の空欄コマへ。 */
@@ -80,7 +85,7 @@ const TYPE_COLOR_OVERRIDES = {
   '通勤急行': '#f97316', // オレンジ
   '区間急行': '#16a34a', // 緑
   '特急': '#dc2626', // 赤
-  '船渡川から普通特急': '#dc2626', // 赤
+  '船渡川から普通 特急': '#dc2626', // 赤(特急と同じ色)
   'ライナー': '#92400e', // 茶
 };
 const DEFAULT_TYPE_COLOR = '#0891b2';
@@ -89,10 +94,9 @@ function getTypeColor(train) {
   return TYPE_COLOR_OVERRIDES[typeKey(train)] || train.typeColor || DEFAULT_TYPE_COLOR;
 }
 
-/** パタパタの種別コマに適用する背景色。該当が無ければ既定(黒地)のまま。 */
-function getFlapTypeStyle(value) {
-  const color = TYPE_COLOR_OVERRIDES[value];
-  return color ? `background:${color};color:#fff;` : '';
+/** パタパタの種別コマは全種別とも白字・黒背景で統一する(色分けはしない) */
+function getFlapTypeStyle() {
+  return '';
 }
 
 /**
@@ -110,12 +114,12 @@ function renderTypeFace(value) {
   if (!isCompoundType(value)) return escapeHtml(value || '');
   const cutIdx = value.indexOf('から') + 2;
   const prefix = value.slice(0, cutIdx); // 例: "船渡川から"
-  const rest = value.slice(cutIdx); // 例: "普通特急"
+  const rest = value.slice(cutIdx).trim(); // 例: "普通 特急" -> 前後の空白は除く
   let large = rest;
   let smallSecond = '';
   for (const cand of KNOWN_TYPE_SUFFIXES) {
     if (rest.endsWith(cand) && rest.length > cand.length) {
-      smallSecond = rest.slice(0, rest.length - cand.length);
+      smallSecond = rest.slice(0, rest.length - cand.length).trim();
       large = cand;
       break;
     }
@@ -132,7 +136,6 @@ async function init() {
   bindEvents();
   tickClock();
   setInterval(tickClock, 1000);
-  setInterval(advanceFlapRotation, FLAP_ROTATION_INTERVAL_MS);
 
   try {
     const manifest = await loadManifest();
@@ -146,14 +149,6 @@ async function init() {
   } catch (err) {
     console.error(err);
     showStatus(friendlyFetchError(err), 'error');
-  }
-}
-
-/** 候補列車のローテーションを1つ進める(表示枠に収まっている間は何も起きない) */
-function advanceFlapRotation() {
-  state.flapRotationOffset += 1;
-  if (state.viewMode === 'realtime' && state.timetable) {
-    renderBoard();
   }
 }
 
@@ -186,7 +181,6 @@ function cacheElements() {
   els.board = document.getElementById('board');
   els.status = document.getElementById('status-line');
   els.statusBar = document.getElementById('status-bar');
-  els.rosenName = document.getElementById('rosen-name');
   els.useNowToggle = document.getElementById('use-now-toggle');
   els.manualClockInput = document.getElementById('manual-clock');
   els.manualClockWrap = document.getElementById('manual-clock-wrap');
@@ -204,21 +198,18 @@ function bindEvents() {
     state.diaIndex = parseInt(e.target.value, 10);
     state.typeFilter = '';
     state.destFilter = '';
-    state.flapRotationOffset = 0;
     renderBoard();
   });
   els.stationSelect.addEventListener('change', (e) => {
     state.stationIndex = parseInt(e.target.value, 10);
     state.typeFilter = '';
     state.destFilter = '';
-    state.flapRotationOffset = 0;
     renderBoard();
   });
   els.directionButtons.forEach((btn) => {
     btn.addEventListener('click', () => {
       state.directionFilter = btn.dataset.direction;
       els.directionButtons.forEach((b) => b.classList.toggle('is-active', b === btn));
-      state.flapRotationOffset = 0;
       renderBoard();
     });
   });
@@ -424,11 +415,7 @@ async function loadOudFile(path) {
     state.timetable = timetable;
     state.diaIndex = 0;
     state.stationIndex = 0;
-    state.flapRotationOffset = 0;
 
-    const manifestEntry = state.manifest.find((m) => m.file === path);
-    const displayRosen = timetable.rosenName || (manifestEntry && manifestEntry.label) || '(無名路線)';
-    els.rosenName.textContent = displayRosen;
     populateDiaSelect(timetable.dias);
     populateStationSelect(timetable.stations);
 
@@ -563,21 +550,12 @@ function renderRealtimeBoard() {
     return;
   }
 
-  // 表示枠(3)を超える候補があれば、一定時間ごとに次の候補へローテーションして見せる
-  // (実物の発車標が、次発以降の候補列車を順番に案内していく挙動を再現)
-  const pool = all
+  // 直近3本のみを表示する(発車時刻に基づく本当の並びのみで、無関係なローテーションはしない)
+  const upcoming = all
     .map((d) => ({ ...d, diff: d.departMinutes - nowMin }))
     .filter((d) => d.diff >= -1)
     .sort((a, b) => a.diff - b.diff)
-    .slice(0, FLAP_ROTATION_POOL_SIZE);
-
-  let upcoming;
-  if (pool.length <= FLAP_ROW_COUNT) {
-    upcoming = pool;
-  } else {
-    const offset = state.flapRotationOffset % pool.length;
-    upcoming = Array.from({ length: FLAP_ROW_COUNT }, (_, i) => pool[(offset + i) % pool.length]);
-  }
+    .slice(0, FLAP_ROW_COUNT);
 
   // 3枠は常に確保し、以降の列車が無い枠は空欄コマとして表示する
   const slots = [0, 1, 2].map((i) => upcoming[i] || null);
@@ -599,36 +577,45 @@ function flapSignHtml(slots) {
   `;
 }
 
-/** この行が目指すべき、各リールの目標コマ番号(0〜59)。dが無い(空枠)場合は空欄コマを目指す。 */
+/** この行が目指すべき、各リールの目標コマ番号。dが無い(空枠)場合は全て空欄コマを目指す。 */
 function flapTargetIndices(d) {
   if (!d) {
     return {
-      hour: flapReelIndexFor(FLAP_REEL.hour, ''),
-      minute: null, // 分のリールには空欄コマが無いため動かさない(枠だけ隠す)
+      hourTens: flapReelIndexFor(FLAP_REEL.hourTens, ''),
+      hourOnes: flapReelIndexFor(FLAP_REEL.hourOnes, ''),
+      minuteTens: flapReelIndexFor(FLAP_REEL.minuteTens, ''),
+      minuteOnes: flapReelIndexFor(FLAP_REEL.minuteOnes, ''),
       type: flapReelIndexFor(FLAP_REEL.type, ''),
       dest: flapReelIndexFor(FLAP_REEL.dest, ''),
     };
   }
   const { train, stop } = d;
   const dep = stop.dep; // 発車時刻のみを使う(到着時刻は表示しない)
-  const hourVal = dep ? String(dep.hour).padStart(2, '0') : '';
-  const minVal = dep ? String(dep.minute).padStart(2, '0') : '';
+  const hourStr = dep && dep.hour <= FLAP_MAX_HOUR ? String(dep.hour).padStart(2, '0') : '';
+  const minStr = dep ? String(dep.minute).padStart(2, '0') : '';
   return {
-    hour: flapReelIndexFor(FLAP_REEL.hour, hourVal),
-    minute: flapReelIndexFor(FLAP_REEL.minute, minVal),
+    hourTens: flapReelIndexFor(FLAP_REEL.hourTens, hourStr ? hourStr[0] : ''),
+    hourOnes: flapReelIndexFor(FLAP_REEL.hourOnes, hourStr ? hourStr[1] : ''),
+    minuteTens: flapReelIndexFor(FLAP_REEL.minuteTens, minStr ? minStr[0] : ''),
+    minuteOnes: flapReelIndexFor(FLAP_REEL.minuteOnes, minStr ? minStr[1] : ''),
     type: flapReelIndexFor(FLAP_REEL.type, typeKey(train)),
     dest: flapReelIndexFor(FLAP_REEL.dest, train.destinationName),
   };
 }
 
 /** 初期表示用の静的コマ(アニメーションなし、目標コマの文字をそのまま印字) */
-function flapTile(className, reelKey, idx) {
+function flapTile(className, reelKey, idx, styleOverride) {
   const value = FLAP_REEL[reelKey][idx] || '';
-  const style = reelKey === 'type' ? getFlapTypeStyle(value) : '';
-  if (reelKey === 'type' && isCompoundType(value)) {
-    return `<span class="flap-tile ${className} is-compound-tile" data-reel="${reelKey}" data-idx="${idx}"${style ? ` style="${style}"` : ''}><span class="flap-face is-compound">${renderTypeFace(value)}</span></span>`;
+  const style = styleOverride || '';
+  return `<span class="flap-tile ${className}" data-reel="${reelKey}" data-idx="${idx}"${style ? ` style="${style}"` : ''}>${tileContentHtml(value)}</span>`;
+}
+
+/** コマの中身のHTML。複合種別だけは上下分割せず、ひとつのまとまりとして表示する。 */
+function tileContentHtml(value) {
+  if (isCompoundType(value)) {
+    return `<span class="flap-compound-face">${renderTypeFace(value)}</span>`;
   }
-  return `<span class="flap-tile ${className}" data-reel="${reelKey}" data-idx="${idx}"${style ? ` style="${style}"` : ''}>${halvesHtml(value)}</span>`;
+  return halvesHtml(value);
 }
 
 /** 上下2分割の静的な面(実機のコマそのもの)のHTML断片を作る */
@@ -638,44 +625,18 @@ function halvesHtml(value) {
     + `<span class="flap-static flap-static-bottom"><span class="flap-static-inner">${escaped}</span></span>`;
 }
 
-/**
- * コマの文字が枠に収まらない場合、フォントサイズはあまり変えず左右方向に圧縮して収める。
- * (実機の行先表示などが長い駅名を横に潰して収めているのを再現)
- */
-function fitTileText(el, innerEls) {
-  if (!el) return;
-  const width = el.clientWidth;
-  if (!width) return;
-  let fontSize = 22;
-  try {
-    fontSize = parseFloat(window.getComputedStyle(el).fontSize) || fontSize;
-  } catch (e) { /* noop */ }
-  const avail = Math.max(0, width - 8);
-  const targets = innerEls || el.querySelectorAll('.flap-static-inner');
-  targets.forEach((inner) => {
-    if (!inner) return;
-    const text = inner.textContent || '';
-    const len = [...text].length || 1;
-    const natural = len * fontSize * 0.98;
-    const scale = natural > avail ? Math.max(0.5, avail / natural) : 1;
-    inner.style.transform = scale < 1 ? `scaleX(${scale.toFixed(3)})` : '';
-  });
-}
-
-/** サイン全体を差分更新/初期構築した後、すべてのコマの横圧縮を再計算する */
-function fitAllFlapTiles() {
-  els.board.querySelectorAll('.flap-tile:not(.is-compound-tile)').forEach((el) => fitTileText(el));
-}
-
 function flapRowHtml(d) {
   const t = flapTargetIndices(d);
   const isEmpty = !d;
+  const typeColorStyle = d ? getFlapTypeStyle(typeKey(d.train)) : '';
   return `
     <div class="flap-row ${isEmpty ? 'is-empty' : ''}" data-train-key="${d ? d.train.key : ''}" tabindex="0">
       <div class="flap-time">
-        ${flapTile('flap-hour', 'hour', t.hour)}<span class="flap-colon">:</span>${flapTile('flap-minute', 'minute', t.minute === null ? 0 : t.minute)}
+        <div class="flap-hour-box">${flapTile('flap-digit flap-h-tens', 'hourTens', t.hourTens)}${flapTile('flap-digit flap-h-ones', 'hourOnes', t.hourOnes)}</div>
+        <span class="flap-colon">:</span>
+        <div class="flap-minute-box">${flapTile('flap-digit flap-m-tens', 'minuteTens', t.minuteTens)}${flapTile('flap-digit flap-m-ones', 'minuteOnes', t.minuteOnes)}</div>
       </div>
-      ${flapTile('flap-type', 'type', t.type)}
+      ${flapTile('flap-type', 'type', t.type, typeColorStyle)}
       ${flapTile('flap-dest', 'dest', t.dest)}
     </div>
   `;
@@ -685,7 +646,6 @@ function flapRowHtml(d) {
 function updateFlapSign(slots) {
   if (!els.board.querySelector('.flap-sign')) {
     els.board.innerHTML = flapSignHtml(slots);
-    fitAllFlapTiles();
     return;
   }
   const rows = els.board.querySelectorAll('.flap-row');
@@ -695,20 +655,28 @@ function updateFlapSign(slots) {
     rowEl.classList.toggle('is-empty', !d);
     rowEl.dataset.trainKey = d ? d.train.key : '';
     const t = flapTargetIndices(d);
-    flipReelTo(rowEl.querySelector('.flap-hour'), t.hour);
-    if (t.minute !== null) flipReelTo(rowEl.querySelector('.flap-minute'), t.minute);
-    flipReelTo(rowEl.querySelector('.flap-type'), t.type);
+    flipReelTo(rowEl.querySelector('.flap-h-tens'), t.hourTens);
+    flipReelTo(rowEl.querySelector('.flap-h-ones'), t.hourOnes);
+    flipReelTo(rowEl.querySelector('.flap-m-tens'), t.minuteTens);
+    flipReelTo(rowEl.querySelector('.flap-m-ones'), t.minuteOnes);
+
+    const typeTile = rowEl.querySelector('.flap-type');
+    if (typeTile) typeTile.style.cssText = d ? getFlapTypeStyle(typeKey(d.train)) : '';
+    flipReelTo(typeTile, t.type);
     flipReelTo(rowEl.querySelector('.flap-dest'), t.dest);
   });
 }
 
-const FLAP_STEP_MS = 90; // 1コマあたりのめくり間隔(動画の実機を参考に、より速く小気味よく)
+const FLAP_STEP_MS = 150; // 1コマあたりのめくり間隔
+const FLAP_LEAF_ANIM_MS = 130; // 葉が中央の水平線を軸に倒れ込むアニメーションの長さ
 
 /**
  * 指定コマまで、リールの並び順(0→1→2→…→59→0)通りに1コマずつめくっていく。
- * 実機同様、コマは上下2分割になっていて「上半分だけ」が下向きに回転しながら落ち、
- * その下で待っている(先に新しい値へ切り替え済みの)上半分が現れる。下半分は常に静止したまま。
- * この1コマぶんのめくりを、目的のコマに着くまで繰り返す。
+ * 実機同様、コマは上下2分割になっていて、めくる瞬間は「上半分」の板が中央の水平線を軸に
+ * 手前に倒れ込む(0°→-180°)。倒れ込んだ板の表には古い値の上半分、裏には次の値の下半分が
+ * 印字されており、倒れ切ると裏面(次の値の下半分)が下側にぴったり重なって見える。
+ * 同時に、板が退いた上側には(先に切り替えておいた)次の値の上半分が現れる。
+ * これを1コマずつ、目的のコマに着くまで繰り返す。
  */
 function flipReelTo(el, targetIdx) {
   if (!el) return;
@@ -725,54 +693,67 @@ function flipReelTo(el, targetIdx) {
     const fromVal = reel[idx];
     idx = (idx + 1) % reel.length;
     const toVal = reel[idx];
+    const isFinal = idx === targetIdx; // これが目的のコマに着く最後の1枚かどうか
 
     el.classList.remove('flap-flip');
     void el.offsetWidth; // 衝撃フラッシュ再始動のための強制リフロー
     el.classList.add('flap-flip');
 
-    const toCompound = el.dataset.reel === 'type' && isCompoundType(toVal);
-    const wasCompound = el.classList.contains('is-compound-tile');
-
-    if (toCompound || wasCompound) {
+    if (isCompoundType(fromVal) || isCompoundType(toVal)) {
       // 複合種別が絡む場合だけは上下分割せず、まるごと差し替える(レアケースの簡略化)
-      el.classList.toggle('is-compound-tile', toCompound);
-      if (toCompound) {
-        el.innerHTML = `<span class="flap-face is-compound">${renderTypeFace(toVal)}</span>`;
-      } else {
-        el.innerHTML = halvesHtml(toVal);
-        fitTileText(el);
-      }
-    } else {
-      // 通常ケース: 上半分に「古い値の上半分」の葉を重ねて落とす
-      if (el._activeLeaf) el._activeLeaf.remove(); // 前のコマの葉が残っていれば即座に片付ける
-      const leaf = document.createElement('span');
-      leaf.className = 'flap-leaf-top';
-      leaf.innerHTML = `<span class="flap-static-inner">${escapeHtml(fromVal)}</span>`;
-      el.appendChild(leaf);
-      el._activeLeaf = leaf;
-      void leaf.offsetWidth; // アニメーション開始のための強制リフロー
-      leaf.classList.add('is-flipping');
-      window.setTimeout(() => {
-        if (el._activeLeaf === leaf) el._activeLeaf = null;
-        leaf.remove();
-      }, FLAP_STEP_MS + 50);
-
-      // 葉の下の土台(上下とも)は先に新しい値へ切り替えておく(葉が落ちきると同時に上側が現れる)
-      const topInner = el.querySelector('.flap-static-top .flap-static-inner');
-      const bottomInner = el.querySelector('.flap-static-bottom .flap-static-inner');
-      if (topInner) topInner.textContent = toVal;
-      if (bottomInner) bottomInner.textContent = toVal;
-      fitTileText(el, [topInner, bottomInner, leaf.querySelector('.flap-static-inner')]);
+      el.innerHTML = tileContentHtml(toVal);
+      el.dataset.idx = idx;
+      if (!isFinal) window.setTimeout(step, FLAP_STEP_MS);
+      return;
     }
 
-    if (el.dataset.reel === 'type') el.style.cssText = getFlapTypeStyle(toVal);
+    // 上半分の板が中央の水平線を軸に手前へ倒れ込む。
+    // 板は1枚だけで、真横になった瞬間(中間地点)に中身を「古い値の上半分」→「次の値の下半分」に
+    // JS側で差し替える(回転の基準点を1つに統一し、裏返り方の計算をシンプルかつ確実にするため)。
+    if (el._activeLeaf) el._activeLeaf.remove(); // 前のコマの葉が残っていれば即座に片付ける
+    const leaf = document.createElement('span');
+    leaf.className = 'flap-leaf';
+    leaf.innerHTML = `<span class="flap-static-inner flap-leaf-inner">${escapeHtml(fromVal)}</span>`;
+    el.appendChild(leaf);
+    el._activeLeaf = leaf;
+    void leaf.offsetWidth; // アニメーション開始のための強制リフロー
+    leaf.classList.add('is-flipping');
+
+    const leafInner = leaf.querySelector('.flap-leaf-inner');
+    window.setTimeout(() => {
+      // 真横になって見えなくなった瞬間: 上半分クリップ→下半分クリップに切り替え、中身も次の値にする
+      if (leafInner) {
+        leafInner.textContent = toVal;
+        leafInner.classList.add('is-bottom-half');
+      }
+    }, FLAP_LEAF_ANIM_MS / 2);
+
+    window.setTimeout(() => {
+      if (el._activeLeaf === leaf) el._activeLeaf = null;
+      leaf.remove();
+      if (isFinal) {
+        // 目的のコマに着地した瞬間だけ、ほんの少し跳ねて静止する
+        el.classList.remove('flap-settle');
+        void el.offsetWidth;
+        el.classList.add('flap-settle');
+      }
+    }, FLAP_LEAF_ANIM_MS + 30);
+
+    // 葉(板)の下で待っている土台は、先に新しい値へ切り替えておく
+    // (上側は板が退いた瞬間に、下側は板の裏面と入れ替わる瞬間に、それぞれ同じ絵になって繋がる)
+    const topInner = el.querySelector('.flap-static-top .flap-static-inner');
+    const bottomInner = el.querySelector('.flap-static-bottom .flap-static-inner');
+    if (topInner) topInner.textContent = toVal;
+    if (bottomInner) bottomInner.textContent = toVal;
+
     el.dataset.idx = idx;
 
-    if (idx !== targetIdx) {
+    if (!isFinal) {
       window.setTimeout(step, FLAP_STEP_MS);
     }
   };
-  step();
+  // 複数コマが同時に動き出すとき、完全に同時ではなく少しだけズレて始まるようにする
+  window.setTimeout(step, Math.random() * 35);
 }
 
 function renderTimetableBrowser() {
