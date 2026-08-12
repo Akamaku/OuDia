@@ -18,7 +18,12 @@ const state = {
   manualClock: null, // {hour, minute}
   typeFilter: '', // 時刻表ブラウザ用の種別絞り込み
   destFilter: '', // 時刻表ブラウザ用の行先絞り込み
+  flapRotationOffset: 0, // 表示枠を超える候補列車をローテーション表示するための位置
 };
+
+const FLAP_ROW_COUNT = 3; // 発車案内の表示段数
+const FLAP_ROTATION_POOL_SIZE = 9; // ローテーション対象とする候補列車の最大数
+const FLAP_ROTATION_INTERVAL_MS = 9000; // ローテーションの間隔(実物の発車標を参考にした値)
 
 /**
  * パタパタ(反転フラップ)式表示機は、60コマの物理リールを模している。
@@ -139,6 +144,7 @@ async function init() {
   bindEvents();
   tickClock();
   setInterval(tickClock, 1000);
+  setInterval(advanceFlapRotation, FLAP_ROTATION_INTERVAL_MS);
 
   try {
     const manifest = await loadManifest();
@@ -152,6 +158,14 @@ async function init() {
   } catch (err) {
     console.error(err);
     showStatus(friendlyFetchError(err), 'error');
+  }
+}
+
+/** 候補列車のローテーションを1つ進める(表示枠に収まっている間は何も起きない) */
+function advanceFlapRotation() {
+  state.flapRotationOffset += 1;
+  if (state.viewMode === 'realtime' && state.timetable) {
+    renderBoard();
   }
 }
 
@@ -202,18 +216,21 @@ function bindEvents() {
     state.diaIndex = parseInt(e.target.value, 10);
     state.typeFilter = '';
     state.destFilter = '';
+    state.flapRotationOffset = 0;
     renderBoard();
   });
   els.stationSelect.addEventListener('change', (e) => {
     state.stationIndex = parseInt(e.target.value, 10);
     state.typeFilter = '';
     state.destFilter = '';
+    state.flapRotationOffset = 0;
     renderBoard();
   });
   els.directionButtons.forEach((btn) => {
     btn.addEventListener('click', () => {
       state.directionFilter = btn.dataset.direction;
       els.directionButtons.forEach((b) => b.classList.toggle('is-active', b === btn));
+      state.flapRotationOffset = 0;
       renderBoard();
     });
   });
@@ -419,6 +436,7 @@ async function loadOudFile(path) {
     state.timetable = timetable;
     state.diaIndex = 0;
     state.stationIndex = 0;
+    state.flapRotationOffset = 0;
 
     const manifestEntry = state.manifest.find((m) => m.file === path);
     const displayRosen = timetable.rosenName || (manifestEntry && manifestEntry.label) || '(無名路線)';
@@ -557,11 +575,21 @@ function renderRealtimeBoard() {
     return;
   }
 
-  const upcoming = all
+  // 表示枠(3)を超える候補があれば、一定時間ごとに次の候補へローテーションして見せる
+  // (実物の発車標が、次発以降の候補列車を順番に案内していく挙動を再現)
+  const pool = all
     .map((d) => ({ ...d, diff: d.departMinutes - nowMin }))
     .filter((d) => d.diff >= -1)
     .sort((a, b) => a.diff - b.diff)
-    .slice(0, 3); // 直近3本(発車順)
+    .slice(0, FLAP_ROTATION_POOL_SIZE);
+
+  let upcoming;
+  if (pool.length <= FLAP_ROW_COUNT) {
+    upcoming = pool;
+  } else {
+    const offset = state.flapRotationOffset % pool.length;
+    upcoming = Array.from({ length: FLAP_ROW_COUNT }, (_, i) => pool[(offset + i) % pool.length]);
+  }
 
   // 3枠は常に確保し、以降の列車が無い枠は空欄コマとして表示する
   const slots = [0, 1, 2].map((i) => upcoming[i] || null);
@@ -669,7 +697,7 @@ function updateFlapSign(slots) {
   });
 }
 
-const FLAP_STEP_MS = 150; // 1コマあたりのめくり間隔(実機のガシャッという感じを再現)
+const FLAP_STEP_MS = 90; // 1コマあたりのめくり間隔(動画の実機を参考に、より速く小気味よく)
 
 /** そのコマの土台(面)に値を反映する(種別コマは色・サイズも一緒に更新) */
 function setFaceValue(el, face, val) {
@@ -717,7 +745,7 @@ function flipReelTo(el, targetIdx) {
     window.setTimeout(() => {
       if (el._activeLeaf === leaf) el._activeLeaf = null;
       leaf.remove();
-    }, FLAP_STEP_MS + 80);
+    }, FLAP_STEP_MS + 50);
 
     // 衝撃フラッシュ(コマが下まで落ちた瞬間のガシャッという光)
     el.classList.remove('flap-flip');
