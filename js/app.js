@@ -61,6 +61,12 @@ function flapReelIndexFor(reel, value) {
  */
 const HIDDEN_TYPES = ['unkyu', '運休'];
 
+/** 表記ゆれの統合。「通急」は「通勤急行」と同じものとして色・コマ・表示名を揃える。 */
+const TYPE_ALIASES = { '通急': '通勤急行' };
+function typeKey(train) {
+  return TYPE_ALIASES[train.typeName] || train.typeName;
+}
+
 // 指定した種別名は色を固定。それ以外はファイルの色設定(無ければデフォルト)を使う。
 // パタパタの種別コマの色にも同じ配色を使う(実物の種別板が色分けされているのを再現)。
 const TYPE_COLOR_OVERRIDES = {
@@ -75,7 +81,7 @@ const TYPE_COLOR_OVERRIDES = {
 const DEFAULT_TYPE_COLOR = '#0891b2';
 
 function getTypeColor(train) {
-  return TYPE_COLOR_OVERRIDES[train.typeName] || train.typeColor || DEFAULT_TYPE_COLOR;
+  return TYPE_COLOR_OVERRIDES[typeKey(train)] || train.typeColor || DEFAULT_TYPE_COLOR;
 }
 
 /** パタパタの種別コマに適用する背景色。該当が無ければ既定(黒地)のまま。 */
@@ -305,7 +311,7 @@ function openTrainModal(train) {
 
   els.modalPanel.innerHTML = `
     <div class="modal-head">
-      <span class="dep-badge dep-badge-inline" style="--chip-color:${typeColor}">${escapeHtml(train.typeName || '普通')}</span>
+      <span class="dep-badge dep-badge-inline" style="--chip-color:${typeColor}">${escapeHtml(typeKey(train) || '普通')}</span>
       <h2 class="modal-title">${escapeHtml(train.destinationName || '-')}<span class="train-number">${train.number ? ' ' + escapeHtml(train.number) : ''}</span></h2>
       <span class="dir-badge dir-${train.direction}">${dirLabel}</span>
       <button type="button" class="modal-close" aria-label="閉じる">×</button>
@@ -499,7 +505,7 @@ function collectStationDepartures() {
     if (stop.flag === '2') continue; // 通過(停車しない)駅では乗車できないため案内しない
     if (!stop.dep) continue; // 発車が無い(到着のみ = 終着・降車専用)駅はここでは案内しない
     const dep = stop.dep;
-    if (state.typeFilter && train.typeName !== state.typeFilter) continue;
+    if (state.typeFilter && typeKey(train) !== state.typeFilter) continue;
     if (state.destFilter && train.destinationName !== state.destFilter) continue;
     trains.push({
       train,
@@ -525,7 +531,7 @@ function populateFilterOptions() {
   state.typeFilter = prevTypeFilter;
   state.destFilter = prevDestFilter;
 
-  const types = [...new Set(base.map((d) => d.train.typeName).filter(Boolean))].sort();
+  const types = [...new Set(base.map((d) => typeKey(d.train)).filter(Boolean))].sort();
   const dests = [...new Set(base.map((d) => d.train.destinationName).filter(Boolean))].sort();
 
   els.typeFilter.innerHTML = '<option value="">すべての種別</option>'
@@ -594,7 +600,7 @@ function flapTargetIndices(d) {
   return {
     hour: flapReelIndexFor(FLAP_REEL.hour, hourVal),
     minute: flapReelIndexFor(FLAP_REEL.minute, minVal),
-    type: flapReelIndexFor(FLAP_REEL.type, train.typeName),
+    type: flapReelIndexFor(FLAP_REEL.type, typeKey(train)),
     dest: flapReelIndexFor(FLAP_REEL.dest, train.destinationName),
   };
 }
@@ -605,7 +611,28 @@ function flapTile(className, reelKey, idx) {
   const style = reelKey === 'type' ? getFlapTypeStyle(value) : '';
   const faceContent = reelKey === 'type' ? renderTypeFace(value) : escapeHtml(value);
   const faceClass = reelKey === 'type' && isCompoundType(value) ? ' is-compound' : '';
-  return `<span class="flap-tile ${className}" data-reel="${reelKey}" data-idx="${idx}"${style ? ` style="${style}"` : ''}><span class="flap-face${faceClass}">${faceContent}</span></span>`;
+  const faceStyle = reelKey === 'type' ? ` style="font-size:${fitTypeFontSize(value)}"` : '';
+  return `<span class="flap-tile ${className}" data-reel="${reelKey}" data-idx="${idx}"${style ? ` style="${style}"` : ''}><span class="flap-face${faceClass}"${faceStyle}>${faceContent}</span></span>`;
+}
+
+/**
+ * 種別コマの文字が枠いっぱいに近くなるよう、文字数に応じてフォントサイズを決める。
+ * 複合種別(「船渡川から普通特急」等)は右側の大きい部分の文字数を基準にする。
+ */
+function fitTypeFontSize(value) {
+  if (!value) return '26px';
+  let basis = value;
+  if (isCompoundType(value)) {
+    const cutIdx = value.indexOf('から') + 2;
+    const rest = value.slice(cutIdx);
+    basis = rest;
+    for (const cand of KNOWN_TYPE_SUFFIXES) {
+      if (rest.endsWith(cand) && rest.length > cand.length) { basis = cand; break; }
+    }
+  }
+  const len = [...basis].length || 1;
+  const px = Math.min(40, Math.max(13, 122 / len));
+  return `${px.toFixed(1)}px`;
 }
 
 function flapRowHtml(d) {
@@ -642,9 +669,24 @@ function updateFlapSign(slots) {
   });
 }
 
-const FLAP_STEP_MS = 130; // 1コマあたりのめくり間隔(実機のガシャッという感じを再現。少しゆっくりめ)
+const FLAP_STEP_MS = 150; // 1コマあたりのめくり間隔(実機のガシャッという感じを再現)
 
-/** 指定コマまで、リールの並び順(0→1→2→…→59→0)通りに1コマずつめくっていく */
+/** そのコマの土台(面)に値を反映する(種別コマは色・サイズも一緒に更新) */
+function setFaceValue(el, face, val) {
+  if (el.dataset.reel === 'type') {
+    setTypeFaceValue(face, val);
+    face.style.fontSize = fitTypeFontSize(val);
+    el.style.cssText = getFlapTypeStyle(val);
+  } else if (face) {
+    face.textContent = val;
+  }
+}
+
+/**
+ * 指定コマまで、リールの並び順(0→1→2→…→59→0)通りに1コマずつめくっていく。
+ * 実機同様、めくれる瞬間だけ「古い値を印字した葉」を上から重ねて落とし、
+ * その下では既に次の値に切り替わった土台が見えている(=葉が落ちきると新しい値が現れる)。
+ */
 function flipReelTo(el, targetIdx) {
   if (!el) return;
   const reel = FLAP_REEL[el.dataset.reel];
@@ -658,21 +700,34 @@ function flipReelTo(el, targetIdx) {
 
   const step = () => {
     if (el._flipToken !== token) return; // 途中で別の目標に切り替わった
+    const fromVal = reel[idx];
     idx = (idx + 1) % reel.length;
-    el.classList.remove('flap-flip');
-    void el.offsetWidth; // アニメーション再始動のための強制リフロー
-    el.classList.add('flap-flip');
+    const toVal = reel[idx];
+
+    // 古い値を印字した葉を重ねてから、回転しながら落とす(実機の1コマぶんのめくり)
+    if (el._activeLeaf) el._activeLeaf.remove(); // 前のコマの葉が残っていれば即座に片付ける
+    const leaf = document.createElement('span');
+    leaf.className = 'flap-leaf';
+    leaf.textContent = fromVal;
+    if (el.dataset.reel === 'type') leaf.style.fontSize = fitTypeFontSize(fromVal);
+    el.appendChild(leaf);
+    el._activeLeaf = leaf;
+    void leaf.offsetWidth; // アニメーション開始のための強制リフロー
+    leaf.classList.add('is-flipping');
     window.setTimeout(() => {
-      if (el._flipToken !== token) return;
-      const val = reel[idx];
-      if (el.dataset.reel === 'type') {
-        setTypeFaceValue(face, val);
-        el.style.cssText = getFlapTypeStyle(val); // 実機の色付きコマを再現(通過中のコマの色も含めて切り替わる)
-      } else if (face) {
-        face.textContent = val;
-      }
-      el.dataset.idx = idx;
-    }, FLAP_STEP_MS * 0.45); // コマが真横になる瞬間に文字を差し替える
+      if (el._activeLeaf === leaf) el._activeLeaf = null;
+      leaf.remove();
+    }, FLAP_STEP_MS + 80);
+
+    // 衝撃フラッシュ(コマが下まで落ちた瞬間のガシャッという光)
+    el.classList.remove('flap-flip');
+    void el.offsetWidth;
+    el.classList.add('flap-flip');
+
+    // 葉の下の土台は先に新しい値へ切り替えておく(葉が落ちきると同時に見える)
+    setFaceValue(el, face, toVal);
+    el.dataset.idx = idx;
+
     if (idx !== targetIdx) {
       window.setTimeout(step, FLAP_STEP_MS);
     }
@@ -707,7 +762,7 @@ function renderTimetableBrowser() {
         <tbody>
           ${all.map((d) => `
             <tr data-train-key="${d.train.key}" tabindex="0">
-              <td class="col-type"><span class="dep-badge dep-badge-inline" style="--chip-color:${getTypeColor(d.train)}">${escapeHtml(d.train.typeName || '普通')}</span></td>
+              <td class="col-type"><span class="dep-badge dep-badge-inline" style="--chip-color:${getTypeColor(d.train)}">${escapeHtml(typeKey(d.train) || '普通')}</span></td>
               <td class="col-dest"><span class="dep-dest-inline">${escapeHtml(d.train.destinationName || '-')}</span><span class="train-number">${d.train.number ? ' ' + escapeHtml(d.train.number) : ''}</span></td>
               <td class="col-time"><span class="dep-time-inline">${d.departLabel}</span></td>
               <td class="col-dir"><span class="dir-badge dir-${d.train.direction}">${d.train.direction === 'Kudari' ? '下り' : '上り'}</span></td>
